@@ -21,7 +21,25 @@ interface PaymentOption {
   amount: string;
   asset: string;
   payTo: string;
+  maxTimeoutSeconds?: unknown;
+  extra?: unknown;
 }
+
+interface PaymentTerms {
+  x402Version?: unknown;
+  accepts?: unknown;
+  extensions?: unknown;
+}
+
+/** Longest payment authorization window accepted for a $0.001 check. */
+const MAX_TIMEOUT_SECONDS = 600;
+/**
+ * EIP-3009 needs only the token's EIP-712 domain name/version. Any other `extra` key
+ * (e.g. assetTransferMethod=permit2, paymentFlow) switches the signer to a different flow.
+ */
+const ALLOWED_EXTRA = new Set(["name", "version"]);
+/** Discovery metadata only; payment extensions such as erc20ApprovalGasSponsoring are refused. */
+const IGNORED_EXTENSIONS = new Set(["bazaar"]);
 
 /**
  * Returns the lowercase host of a URL or bare host.
@@ -52,13 +70,51 @@ function isFreeQuotaAnswer(body: unknown): boolean {
  * @returns True for exact Base USDC to BotsRated at or below the published price
  */
 function isBotsRatedCheckPayment(o: PaymentOption): boolean {
+  if (!o || typeof o !== "object") return false;
+  const extra = o.extra ?? {};
+  const timeout = o.maxTimeoutSeconds ?? MAX_TIMEOUT_SECONDS;
   return (
+    typeof extra === "object" &&
+    !Array.isArray(extra) &&
+    Object.entries(extra as Record<string, unknown>).every(
+      ([k, v]) => ALLOWED_EXTRA.has(k) && typeof v === "string",
+    ) &&
+    Number.isInteger(timeout) &&
+    (timeout as number) > 0 &&
+    (timeout as number) <= MAX_TIMEOUT_SECONDS &&
     o.scheme === "exact" &&
     o.network === BASE_MAINNET_CAIP2 &&
     o.asset?.toLowerCase() === BASE_USDC.toLowerCase() &&
     o.payTo?.toLowerCase() === BOTSRATED_PAY_TO.toLowerCase() &&
     /^\d+$/.test(o.amount) &&
     BigInt(o.amount) <= CHECK_PRICE_ATOMIC
+  );
+}
+
+/**
+ * Whether a whole 402 is one this provider will sign: x402 v2, every option an acceptable BotsRated
+ * check payment, and no payment extensions (only the discovery-only bazaar key is tolerated).
+ *
+ * @param terms - The PaymentRequired object
+ * @returns True when every part of the quote is allowed
+ */
+function isBotsRatedCheckQuote(terms: PaymentTerms | null | undefined): boolean {
+  if (!terms || typeof terms !== "object" || terms.x402Version !== 2) return false;
+  const ext = terms.extensions;
+  if (
+    ext !== undefined &&
+    ext !== null &&
+    (typeof ext !== "object" ||
+      Array.isArray(ext) ||
+      !Object.keys(ext).every(k => IGNORED_EXTENSIONS.has(k)))
+  ) {
+    return false;
+  }
+  const accepts = terms.accepts;
+  return (
+    Array.isArray(accepts) &&
+    accepts.length > 0 &&
+    accepts.every(o => isBotsRatedCheckPayment(o as PaymentOption))
   );
 }
 
@@ -209,19 +265,16 @@ Inputs:
       }
       const header = quote.headers.get("payment-required");
       const terms = header ? JSON.parse(atob(header)) : await quote.json();
-      const accepts: PaymentOption[] | undefined = terms?.accepts;
-      // Fail closed: every option has to be one this provider is willing to pay.
-      if (
-        !Array.isArray(accepts) ||
-        accepts.length === 0 ||
-        !accepts.every(isBotsRatedCheckPayment)
-      ) {
+      // Fail closed: every option has to be one this provider is willing to pay, with no
+      // Permit2 / approval extras or payment extensions.
+      if (!isBotsRatedCheckQuote(terms)) {
         return JSON.stringify({
           error: true,
           message:
-            "BotsRated quote rejected: every payment option must be exact Base USDC to BotsRated at $0.001 or less",
+            "BotsRated quote rejected: every payment option must be exact EIP-3009 Base USDC to BotsRated at $0.001 or less, with no payment extensions",
         });
       }
+      const accepts = terms.accepts as PaymentOption[];
       const amount = accepts.reduce((m, o) => (BigInt(o.amount) > m ? BigInt(o.amount) : m), 0n);
       if (this.spentAtomic + amount > this.limitAtomic) {
         return JSON.stringify({
@@ -234,12 +287,19 @@ Inputs:
 
       const client = new x402Client();
       registerExactEvmScheme(client, { signer: this.toX402Signer(walletProvider) });
-      // Sign only the payment validated above.
-      client.onBeforePaymentCreation(async ({ selectedRequirements }) => {
+      // Sign only the payment validated above. This runs on the exact 402 the client is about to
+      // sign, before the scheme is called, so a re-served quote is checked again in full.
+      client.onBeforePaymentCreation(async ({ paymentRequired, selectedRequirements }) => {
         const r = selectedRequirements as PaymentOption;
-        if (!isBotsRatedCheckPayment(r) || BigInt(r.amount) > amount) {
+        if (
+          !isBotsRatedCheckQuote(paymentRequired as PaymentTerms) ||
+          !isBotsRatedCheckPayment(r) ||
+          BigInt(r.amount) > amount
+        ) {
           return { abort: true, reason: "payment does not match the validated BotsRated quote" };
         }
+        // Never hand extensions to the signer (only discovery metadata can reach here).
+        delete (paymentRequired as PaymentTerms).extensions;
       });
       // Once a payment has been signed it may settle even if the call then fails, so the
       // reservation is only released when no payment was created.

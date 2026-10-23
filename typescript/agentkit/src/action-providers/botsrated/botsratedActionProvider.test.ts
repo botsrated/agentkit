@@ -46,6 +46,18 @@ const CHECK_TERMS = {
   ],
 };
 
+// Otherwise acceptable Base USDC terms asking for Permit2 plus an ERC-20 approval of Permit2.
+const PERMIT2_TERMS = {
+  ...CHECK_TERMS,
+  accepts: [
+    {
+      ...CHECK_TERMS.accepts[0],
+      extra: { name: "USD Coin", version: "2", assetTransferMethod: "permit2" },
+    },
+  ],
+  extensions: { erc20ApprovalGasSponsoring: { info: {}, schema: {} } },
+};
+
 const jsonResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -324,13 +336,90 @@ describe("BotsRatedActionProvider", () => {
       });
       expect(hook).toBeDefined();
       const ok = CHECK_TERMS.accepts[0];
-      expect(await hook!({ selectedRequirements: ok })).toBeUndefined();
-      expect(await hook!({ selectedRequirements: { ...ok, amount: "1001" } })).toMatchObject({
+      const ctx = (r: unknown, pr: unknown = CHECK_TERMS) => ({
+        paymentRequired: structuredClone(pr),
+        selectedRequirements: r,
+      });
+      expect(await hook!(ctx(ok))).toBeUndefined();
+      expect(await hook!(ctx({ ...ok, amount: "1001" }))).toMatchObject({ abort: true });
+      expect(await hook!(ctx({ ...ok, payTo: SELLER_PAY_TO }))).toMatchObject({ abort: true });
+      // A re-served 402 is checked again in full before the scheme signs anything.
+      expect(await hook!(ctx(PERMIT2_TERMS.accepts[0], PERMIT2_TERMS))).toMatchObject({
         abort: true,
       });
-      expect(await hook!({ selectedRequirements: { ...ok, payTo: SELLER_PAY_TO } })).toMatchObject({
-        abort: true,
-      });
+      expect(
+        await hook!(ctx(ok, { ...CHECK_TERMS, extensions: PERMIT2_TERMS.extensions })),
+      ).toMatchObject({ abort: true });
+      const bazaar = ctx(ok, { ...CHECK_TERMS, extensions: { bazaar: {} } });
+      expect(await hook!(bazaar)).toBeUndefined();
+      expect(bazaar.paymentRequired).not.toHaveProperty("extensions");
+    });
+  });
+
+  describe("paid_check quote hardening", () => {
+    const ok = { ...CHECK_TERMS.accepts[0], extra: { name: "USD Coin", version: "2" } };
+    const cases: Array<[string, unknown]> = [
+      ["permit2 extra + approval extension", PERMIT2_TERMS],
+      ["permit2 extra alone", { ...PERMIT2_TERMS, extensions: undefined }],
+      ["approval extension alone", { ...CHECK_TERMS, extensions: PERMIT2_TERMS.extensions }],
+      ["eip2612 extension", { ...CHECK_TERMS, extensions: { eip2612GasSponsoring: {} } }],
+      [
+        "bazaar plus approval",
+        { ...CHECK_TERMS, extensions: { bazaar: {}, erc20ApprovalGasSponsoring: {} } },
+      ],
+      ["paymentFlow extra", { ...CHECK_TERMS, accepts: [{ ...ok, extra: { paymentFlow: "x" } }] }],
+      ["long timeout", { ...CHECK_TERMS, accepts: [{ ...ok, maxTimeoutSeconds: 86400 }] }],
+      ["string timeout", { ...CHECK_TERMS, accepts: [{ ...ok, maxTimeoutSeconds: "300" }] }],
+      ["x402 v1", { ...CHECK_TERMS, x402Version: 1 }],
+    ];
+    it.each(cases)("rejects %s before any payment", async (_name, terms) => {
+      fetchMock.mockResolvedValue(quote402(terms as typeof CHECK_TERMS));
+      const provider = botsratedActionProvider({ maxSpendUsdc: 1 });
+      const out = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(out.message).toContain("quote rejected");
+      expect(wrapFetchWithPayment).not.toHaveBeenCalled();
+      expect(paidFetch).not.toHaveBeenCalled();
+    });
+
+    it("accepts BotsRated's real 402 shape (EIP-3009 extra, bazaar discovery extension)", async () => {
+      fetchMock.mockResolvedValue(
+        quote402({ ...CHECK_TERMS, accepts: [ok], extensions: { bazaar: { info: {} } } } as never),
+      );
+      paidFetch.mockResolvedValue(jsonResponse({ host: "blockrun.ai" }));
+      const out = JSON.parse(
+        await botsratedActionProvider({ maxSpendUsdc: 1 }).paidCheck(wallet, {
+          host: "blockrun.ai",
+        }),
+      );
+      expect(out.success).toBe(true);
+    });
+
+    it("a re-served Permit2 402 never reaches a transaction-capable signer (real x402 client)", async () => {
+      const actualFetch = jest.requireActual("@x402/fetch");
+      const actualEvm = jest.requireActual("@x402/evm/exact/client");
+      const { registerExactEvmScheme } = jest.requireMock("@x402/evm/exact/client");
+      (x402Client as unknown as jest.Mock).mockImplementation(() => new actualFetch.x402Client());
+      (registerExactEvmScheme as jest.Mock).mockImplementation(actualEvm.registerExactEvmScheme);
+      (wrapFetchWithPayment as jest.Mock).mockImplementation(actualFetch.wrapFetchWithPayment);
+      const signer = {
+        address: "0x0000000000000000000000000000000000000001",
+        signTypedData: jest.fn(),
+        signTransaction: jest.fn(),
+        getTransactionCount: jest.fn(),
+      };
+      wallet.toSigner = jest.fn().mockReturnValue(signer);
+      wallet.readContract = jest.fn();
+      // First (validated) quote is clean; the client's own fetch then gets the Permit2 quote.
+      fetchMock
+        .mockResolvedValueOnce(quote402())
+        .mockImplementation(async () => quote402(PERMIT2_TERMS));
+      const provider = botsratedActionProvider({ maxSpendUsdc: 1 });
+      const out = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(out).toMatchObject({ error: true, mayHaveBeenCharged: false, remainingUsdc: 1 });
+      expect(signer.signTypedData).not.toHaveBeenCalled();
+      expect(signer.signTransaction).not.toHaveBeenCalled();
+      expect(signer.getTransactionCount).not.toHaveBeenCalled();
+      expect(wallet.readContract).not.toHaveBeenCalled();
     });
   });
 
