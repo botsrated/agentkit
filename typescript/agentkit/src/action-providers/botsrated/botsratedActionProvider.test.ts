@@ -59,15 +59,20 @@ describe("BotsRatedActionProvider", () => {
   const fetchMock = jest.fn();
   const paidFetch = jest.fn();
   let hook: ((ctx: unknown) => Promise<unknown>) | undefined;
+  let afterHook: (() => Promise<void>) | undefined;
   let wallet: jest.Mocked<EvmWalletProvider>;
 
   beforeEach(() => {
     jest.resetAllMocks();
     global.fetch = fetchMock;
     hook = undefined;
+    afterHook = undefined;
     (x402Client as unknown as jest.Mock).mockImplementation(() => ({
       onBeforePaymentCreation: (h: (ctx: unknown) => Promise<unknown>) => {
         hook = h;
+      },
+      onAfterPaymentCreation: (h: () => Promise<void>) => {
+        afterHook = h;
       },
     }));
     (wrapFetchWithPayment as jest.Mock).mockReturnValue(paidFetch);
@@ -106,6 +111,17 @@ describe("BotsRatedActionProvider", () => {
         }),
       );
       expect(out.payToCheck).toBe("not_seen");
+    });
+
+    it("does not treat a listing-only payTo as observed", async () => {
+      const listed = "0x1111111111111111111111111111111111111111";
+      fetchMock.mockResolvedValue(
+        jsonResponse({ ...PREFLIGHT, listing: { ...PREFLIGHT.listing, payTo: listed } }),
+      );
+      const out = JSON.parse(
+        await botsratedActionProvider().preflight(wallet, { url: "blockrun.ai", payTo: listed }),
+      );
+      expect(out.payToCheck).toBe("listing_only");
     });
 
     it("does not compare payTo across networks", async () => {
@@ -207,17 +223,65 @@ describe("BotsRatedActionProvider", () => {
       expect(paidFetch).toHaveBeenCalledTimes(1);
     });
 
-    it("releases the reservation when the paid request fails", async () => {
+    it("keeps the reservation when a signed payment's request fails", async () => {
+      fetchMock.mockImplementation(async () => quote402());
+      paidFetch.mockImplementationOnce(async () => {
+        await afterHook!(); // the payment was signed and may settle
+        return jsonResponse({}, 500);
+      });
+      const provider = botsratedActionProvider({ maxSpendUsdc: 0.001 });
+      const first = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(first).toMatchObject({ error: true, mayHaveBeenCharged: true, remainingUsdc: 0 });
+      const second = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(second.message).toBe("BotsRated spend limit reached");
+      expect(paidFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the reservation when a signed payment's request throws", async () => {
+      fetchMock.mockImplementation(async () => quote402());
+      paidFetch.mockImplementationOnce(async () => {
+        await afterHook!();
+        throw new Error("socket hang up");
+      });
+      const provider = botsratedActionProvider({ maxSpendUsdc: 0.001 });
+      const out = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(out).toMatchObject({ error: true, mayHaveBeenCharged: true, remainingUsdc: 0 });
+    });
+
+    it("releases the reservation when the request fails before any payment is signed", async () => {
       fetchMock.mockImplementation(async () => quote402());
       paidFetch.mockResolvedValueOnce(jsonResponse({}, 500));
       paidFetch.mockResolvedValueOnce(jsonResponse({ host: "blockrun.ai" }));
       const provider = botsratedActionProvider({ maxSpendUsdc: 0.001 });
-      expect(JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" })).error).toBe(
-        true,
-      );
+      const first = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(first).toMatchObject({ error: true, mayHaveBeenCharged: false });
       expect(JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" })).success).toBe(
         true,
       );
+    });
+
+    it("rejects a quote that also offers any other payment option", async () => {
+      const foreign = { ...CHECK_TERMS.accepts[0], amount: "500000", payTo: SELLER_PAY_TO };
+      fetchMock.mockResolvedValue(
+        quote402({ ...CHECK_TERMS, accepts: [foreign, CHECK_TERMS.accepts[0]] }),
+      );
+      const out = JSON.parse(
+        await botsratedActionProvider({ maxSpendUsdc: 1 }).paidCheck(wallet, {
+          host: "blockrun.ai",
+        }),
+      );
+      expect(out.message).toContain("quote rejected");
+      expect(paidFetch).not.toHaveBeenCalled();
+    });
+
+    it("does not follow redirects on the quote or the paid request", async () => {
+      fetchMock.mockImplementation(async () => quote402());
+      paidFetch.mockImplementation(async () => jsonResponse({ host: "blockrun.ai" }));
+      await botsratedActionProvider({ maxSpendUsdc: 0.01 }).paidCheck(wallet, {
+        host: "blockrun.ai",
+      });
+      expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+      expect(paidFetch.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
     });
 
     it("uses a free-quota answer without paying or counting it against the limit", async () => {
