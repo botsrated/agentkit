@@ -38,7 +38,7 @@ const CHECK_TERMS = {
     {
       scheme: "exact",
       network: "eip155:8453",
-      amount: "2000",
+      amount: "1000",
       asset: BASE_USDC,
       payTo: BOTSRATED_PAY_TO,
       maxTimeoutSeconds: 300,
@@ -193,10 +193,10 @@ describe("BotsRatedActionProvider", () => {
     it("pays once, tracks spend and stops at the limit", async () => {
       fetchMock.mockImplementation(async () => quote402());
       paidFetch.mockImplementation(async () => jsonResponse({ host: "blockrun.ai", measured: {} }));
-      const provider = botsratedActionProvider({ maxSpendUsdc: 0.003 });
+      const provider = botsratedActionProvider({ maxSpendUsdc: 0.0015 });
 
       const first = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
-      expect(first).toMatchObject({ success: true, paidUsdc: 0.002, remainingUsdc: 0.001 });
+      expect(first).toMatchObject({ success: true, paidUsdc: 0.001, remainingUsdc: 0.0005 });
       expect(paidFetch).toHaveBeenCalledWith(
         "https://botsrated.com/v1/check?host=blockrun.ai",
         expect.anything(),
@@ -211,13 +211,45 @@ describe("BotsRatedActionProvider", () => {
       fetchMock.mockImplementation(async () => quote402());
       paidFetch.mockResolvedValueOnce(jsonResponse({}, 500));
       paidFetch.mockResolvedValueOnce(jsonResponse({ host: "blockrun.ai" }));
-      const provider = botsratedActionProvider({ maxSpendUsdc: 0.002 });
+      const provider = botsratedActionProvider({ maxSpendUsdc: 0.001 });
       expect(JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" })).error).toBe(
         true,
       );
       expect(JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" })).success).toBe(
         true,
       );
+    });
+
+    it("uses a free-quota answer without paying or counting it against the limit", async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse({
+          host: "blockrun.ai",
+          charged: false,
+          free_quota: { route: "check", used: 1, limit: 100, remaining: 99 },
+        }),
+      );
+      const provider = botsratedActionProvider({ maxSpendUsdc: 0.001 });
+      const out = JSON.parse(await provider.paidCheck(wallet, { host: "blockrun.ai" }));
+      expect(out).toMatchObject({
+        success: true,
+        paidUsdc: 0,
+        charged: false,
+        remainingUsdc: 0.001,
+      });
+      expect(paidFetch).not.toHaveBeenCalled();
+    });
+
+    it("refuses a quote above the published $0.001 price", async () => {
+      fetchMock.mockResolvedValue(
+        quote402({ ...CHECK_TERMS, accepts: [{ ...CHECK_TERMS.accepts[0], amount: "2000" }] }),
+      );
+      const out = JSON.parse(
+        await botsratedActionProvider({ maxSpendUsdc: 0.01 }).paidCheck(wallet, {
+          host: "blockrun.ai",
+        }),
+      );
+      expect(out.message).toContain("quote rejected");
+      expect(paidFetch).not.toHaveBeenCalled();
     });
 
     it("registers a hook that refuses any payment other than the validated quote", async () => {
@@ -229,7 +261,7 @@ describe("BotsRatedActionProvider", () => {
       expect(hook).toBeDefined();
       const ok = CHECK_TERMS.accepts[0];
       expect(await hook!({ selectedRequirements: ok })).toBeUndefined();
-      expect(await hook!({ selectedRequirements: { ...ok, amount: "2001" } })).toMatchObject({
+      expect(await hook!({ selectedRequirements: { ...ok, amount: "1001" } })).toMatchObject({
         abort: true,
       });
       expect(await hook!({ selectedRequirements: { ...ok, payTo: SELLER_PAY_TO } })).toMatchObject({

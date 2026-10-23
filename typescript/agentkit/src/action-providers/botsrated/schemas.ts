@@ -30,7 +30,9 @@ export const BotsRatedPaidCheckSchema = z
       .describe("The x402 seller host or URL to look up, e.g. api.example.com"),
   })
   .strip()
-  .describe("Instructions for a paid ($0.002) BotsRated check of an x402 seller");
+  .describe(
+    "Instructions for a paid ($0.001, first 100 per day free) BotsRated check of an x402 seller",
+  );
 
 /**
  * Configuration for the BotsRated action provider.
@@ -39,7 +41,7 @@ export interface BotsRatedConfig {
   /** Defaults to https://botsrated.com */
   baseUrl?: string;
   /**
-   * Total USDC the provider may spend on paid BotsRated checks ($0.002 each).
+   * Total USDC the provider may spend on paid BotsRated checks ($0.001 each; the first 100 per day are free and not counted).
    * Paid checks are disabled unless this is set (or BOTSRATED_MAX_SPEND_USDC is set).
    */
   maxSpendUsdc?: number;

@@ -212,7 +212,7 @@ const agent = createAgent({
 </tr>
 <tr>
     <td width="200"><code>paid_check</code></td>
-    <td width="768">Paid ($0.002 USDC on Base) full facts for one seller host. Disabled unless a spend limit is configured.</td>
+    <td width="768">Paid ($0.001 USDC on Base, first 100 per day free) full facts for one seller host. Disabled unless a spend limit is configured.</td>
 </tr>
 </table>
 </details>
