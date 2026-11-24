@@ -27,7 +27,7 @@ tests/action_providers/botsrated/
 - `preflight`: Look up an x402 seller or MCP server before paying it (`GET /v1/preflight`, free and unlimited).
   - Optionally pass the `pay_to` and `network` of the x402 payment option you are about to pay. `payToCheck` is `matches_observed` only when BotsRated's own probe saw that payTo on that network; `listing_only` and `not_seen` tell the agent to ask the user first.
   - Uncovered hosts return `covered: false`, which is not a judgment of the seller.
-- `check_host`: Detailed measured facts for one host (`GET /v1/check`), served from BotsRated's free daily quota (100 per client per UTC day). Once the quota is used up, BotsRated answers with an x402 `402` ($0.001 USDC on Base); this action does **not** pay and returns `paymentRequired: true` instead.
+- `check_host`: Detailed measured facts for one host (`GET /v1/check`), served from BotsRated's free daily quota (5 per client per UTC day). Once the quota is used up, BotsRated answers with an x402 `402` ($0.01 USDC on Base); this action does **not** pay and returns `paymentRequired: true` instead.
 - `find_services`: Find x402 sellers and MCP servers for a need (`GET /v1/find`), limited to services that passed a recent check, each with a one-line factual reason, quoted price, median latency and page URL. Uses the same free daily quota.
 
 ## Usage
