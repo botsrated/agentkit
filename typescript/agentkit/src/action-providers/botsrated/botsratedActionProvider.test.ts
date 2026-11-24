@@ -315,9 +315,9 @@ describe("BotsRatedActionProvider", () => {
       expect(paidFetch).not.toHaveBeenCalled();
     });
 
-    it("refuses a quote above the published $0.001 price", async () => {
+    it("refuses a quote above the published $0.01 price", async () => {
       fetchMock.mockResolvedValue(
-        quote402({ ...CHECK_TERMS, accepts: [{ ...CHECK_TERMS.accepts[0], amount: "2000" }] }),
+        quote402({ ...CHECK_TERMS, accepts: [{ ...CHECK_TERMS.accepts[0], amount: "10001" }] }),
       );
       const out = JSON.parse(
         await botsratedActionProvider({ maxSpendUsdc: 0.01 }).paidCheck(wallet, {
@@ -370,6 +370,7 @@ describe("BotsRatedActionProvider", () => {
       ["paymentFlow extra", { ...CHECK_TERMS, accepts: [{ ...ok, extra: { paymentFlow: "x" } }] }],
       ["long timeout", { ...CHECK_TERMS, accepts: [{ ...ok, maxTimeoutSeconds: 86400 }] }],
       ["string timeout", { ...CHECK_TERMS, accepts: [{ ...ok, maxTimeoutSeconds: "300" }] }],
+      ["missing timeout", { ...CHECK_TERMS, accepts: [{ ...ok, maxTimeoutSeconds: undefined }] }],
       ["x402 v1", { ...CHECK_TERMS, x402Version: 1 }],
     ];
     it.each(cases)("rejects %s before any payment", async (_name, terms) => {
